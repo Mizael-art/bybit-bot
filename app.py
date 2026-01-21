@@ -5,7 +5,13 @@ import numpy as np
 import os
 
 app = Flask(__name__)
+
 BINANCE = "https://api.binance.com"
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (HelpTradeIA)",
+    "Accept": "application/json"
+}
 
 # ======================================================
 # DADOS DE MERCADO
@@ -13,16 +19,24 @@ BINANCE = "https://api.binance.com"
 def get_candles(symbol, tf="1h", limit=300):
     url = f"{BINANCE}/api/v3/klines"
     params = {"symbol": symbol, "interval": tf, "limit": limit}
-    r = requests.get(url, params=params, timeout=10)
-    if r.status_code != 200:
+
+    try:
+        r = requests.get(url, params=params, headers=HEADERS, timeout=10)
+        if r.status_code != 200:
+            return None
+
+        data = r.json()
+    except Exception:
         return None
 
-    df = pd.DataFrame(r.json(), columns=[
+    df = pd.DataFrame(data, columns=[
         "time","open","high","low","close","volume",
         "close_time","qv","trades","tb","tq","ignore"
     ])
+
     for c in ["open","high","low","close","volume"]:
         df[c] = df[c].astype(float)
+
     return df
 
 
@@ -40,27 +54,28 @@ def rsi(series, period=14):
 
 
 def macd(series):
-    ema12 = series.ewm(span=12).mean()
-    ema26 = series.ewm(span=26).mean()
+    ema12 = series.ewm(span=12, adjust=False).mean()
+    ema26 = series.ewm(span=26, adjust=False).mean()
     macd_line = ema12 - ema26
-    signal = macd_line.ewm(span=9).mean()
+    signal = macd_line.ewm(span=9, adjust=False).mean()
     return macd_line, signal
 
 
 # ======================================================
-# ESTRUTURA + TOPOS E FUNDOS
+# ESTRUTURA
 # ======================================================
 def market_structure(df):
     highs, lows = df["high"], df["low"]
     tops, bottoms = [], []
 
-    for i in range(2, len(df)-2):
+    for i in range(2, len(df) - 2):
         if highs[i] > highs[i-1] and highs[i] > highs[i+1]:
             tops.append(highs[i])
         if lows[i] < lows[i-1] and lows[i] < lows[i+1]:
             bottoms.append(lows[i])
 
     structure = "Lateral / Confusa"
+
     if len(tops) >= 2 and len(bottoms) >= 2:
         if tops[-1] > tops[-2] and bottoms[-1] > bottoms[-2]:
             structure = "Alta (HH + HL)"
@@ -77,13 +92,13 @@ def confluence_score(df, structure):
     score = 0
     reasons = []
 
-    if structure.startswith("Alta") or structure.startswith("Baixa"):
+    if structure.startswith(("Alta", "Baixa")):
         score += 1
-        reasons.append("Estrutura clara")
+        reasons.append("Estrutura definida")
 
     if df["ma50"].iloc[-1] > df["ma200"].iloc[-1]:
         score += 1
-        reasons.append("Média 50 acima da 200")
+        reasons.append("MA50 acima da MA200")
 
     if df["rsi"].iloc[-1] < 30 or df["rsi"].iloc[-1] > 70:
         score += 1
@@ -103,13 +118,13 @@ def confluence_score(df, structure):
 def home():
     return jsonify({
         "status": "online",
-        "bot": "Help Trade IA",
-        "mode": "Análise técnica conservadora"
+        "service": "Help Trade IA",
+        "message": "API funcionando corretamente"
     })
 
 
 # ======================================================
-# ANÁLISE DE UM PAR
+# ANÁLISE INDIVIDUAL
 # ======================================================
 @app.route("/analyze")
 def analyze():
@@ -120,8 +135,8 @@ def analyze():
         return jsonify({"error": "Use ?symbol=BTCUSDT"}), 400
 
     df = get_candles(symbol, tf)
-    if df is None:
-        return jsonify({"error": "Erro ao buscar dados"}), 500
+    if df is None or len(df) < 200:
+        return jsonify({"error": "Erro ao buscar dados do mercado"}), 500
 
     df["rsi"] = rsi(df["close"])
     df["macd"], df["signal"] = macd(df["close"])
@@ -133,8 +148,8 @@ def analyze():
 
     decision = "Esperar"
     if score >= 3:
-        decision = "Cenário interessante (avaliar entrada)"
-    if score < 2:
+        decision = "Cenário interessante"
+    elif score < 2:
         decision = "Cenário fraco – NÃO operar"
 
     return jsonify({
@@ -155,12 +170,7 @@ def analyze():
             "score": score,
             "factors": reasons
         },
-        "decision": decision,
-        "risk_rules": {
-            "max_risk": "1% a 3%",
-            "rr_min": "1:3",
-            "note": "Nunca aumentar risco com mais confiança"
-        }
+        "decision": decision
     })
 
 
@@ -169,13 +179,28 @@ def analyze():
 # ======================================================
 @app.route("/scan/market")
 def scan_market():
-    info = requests.get(f"{BINANCE}/api/v3/exchangeInfo").json()
-    symbols = [s["symbol"] for s in info["symbols"]
-               if s["quoteAsset"] == "USDT" and s["status"] == "TRADING"]
+    try:
+        r = requests.get(
+            f"{BINANCE}/api/v3/exchangeInfo",
+            headers=HEADERS,
+            timeout=10
+        )
+        if r.status_code != 200:
+            return jsonify({"error": "Erro ao acessar exchangeInfo"}), 500
+
+        info = r.json()
+    except Exception:
+        return jsonify({"error": "Falha ao buscar pares"}), 500
+
+    symbols = [
+        s["symbol"]
+        for s in info["symbols"]
+        if s["quoteAsset"] == "USDT" and s["status"] == "TRADING"
+    ]
 
     results = []
 
-    for symbol in symbols[:40]:
+    for symbol in symbols[:30]:
         df = get_candles(symbol, "1h", 200)
         if df is None:
             continue
