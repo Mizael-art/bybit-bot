@@ -1,128 +1,106 @@
-from flask import Flask, request, jsonify
+from flask import Flask, jsonify, request
 import requests
-import pandas as pd
-import numpy as np
-from ta.trend import SMAIndicator, MACD
-from ta.momentum import RSIIndicator, StochasticOscillator
-from scipy.signal import argrelextrema
+import os
 
 app = Flask(__name__)
 
-BASE_URL = "https://api.bybit.com/v5/market"
-TIMEFRAMES = {
-    "15m": "15",
-    "1H": "60",
-    "4H": "240",
-    "1D": "D"
-}
-LIMIT = 200
-
-# ===============================
-# UTILIDADES
-# ===============================
-def get_candles(symbol, interval):
-    r = requests.get(f"{BASE_URL}/kline", params={
-        "category": "linear",
-        "symbol": symbol,
-        "interval": interval,
-        "limit": LIMIT
+# ======================================================
+# ROTA RAIZ - HEALTH CHECK
+# ======================================================
+@app.route("/")
+def home():
+    return jsonify({
+        "status": "online",
+        "service": "Help Trade IA",
+        "message": "API funcionando corretamente"
     })
-    data = r.json()["result"]["list"]
-    df = pd.DataFrame(data, columns=[
-        "timestamp","open","high","low","close","volume","turnover"
-    ])
-    df = df.astype(float).sort_values("timestamp")
-    return df
 
-def add_indicators(df):
-    df["ma50"] = SMAIndicator(df["close"], 50).sma_indicator()
-    df["ma200"] = SMAIndicator(df["close"], 200).sma_indicator()
-    df["rsi"] = RSIIndicator(df["close"]).rsi()
-    macd = MACD(df["close"])
-    df["macd"] = macd.macd_diff()
-    stoch = StochasticOscillator(df["high"], df["low"], df["close"])
-    df["stoch"] = stoch.stoch()
-    return df
 
-def structure(df):
-    tops = argrelextrema(df["high"].values, np.greater, order=5)[0]
-    bottoms = argrelextrema(df["low"].values, np.less, order=5)[0]
-
-    if len(tops) < 2 or len(bottoms) < 2:
-        return "Indefinida"
-
-    t1, t2 = df.iloc[tops][-2:]["high"]
-    f1, f2 = df.iloc[bottoms][-2:]["low"]
-
-    if t2 > t1 and f2 > f1:
-        return "Alta"
-    elif t2 < t1 and f2 < f1:
-        return "Baixa"
-    else:
-        return "Lateral"
-
-# ===============================
-# ENDPOINT: ANALISAR UM PAR
-# ===============================
-@app.route("/analyze/symbol", methods=["GET"])
-def analyze_symbol():
-    symbol = request.args.get("symbol")
-    strategy = request.args.get("strategy", "completa")
-
-    result = {"symbol": symbol, "strategy": strategy, "timeframes": []}
-
-    for tf, interval in TIMEFRAMES.items():
-        df = add_indicators(get_candles(symbol, interval))
-        last = df.iloc[-1]
-
-        result["timeframes"].append({
-            "timeframe": tf,
-            "estrutura": structure(df),
-            "preco": round(last["close"], 2),
-            "ma50": round(last["ma50"], 2),
-            "ma200": round(last["ma200"], 2),
-            "rsi": round(last["rsi"], 2),
-            "macd": round(last["macd"], 4),
-            "stoch": round(last["stoch"], 2)
-        })
-
-    return jsonify(result)
-
-# ===============================
-# ENDPOINT: SCANNER DE MERCADO
-# ===============================
-@app.route("/analyze/market", methods=["GET"])
+# ======================================================
+# SCAN DE TODOS OS PARES FUTUROS USDT (BYBIT - API PÚBLICA)
+# ======================================================
+@app.route("/analyze/market")
 def scan_market():
-    r = requests.get(f"{BASE_URL}/instruments-info", params={"category": "linear"})
-    symbols = [s["symbol"] for s in r.json()["result"]["list"] if s["quoteCoin"] == "USDT"]
+    url = "https://api.bybit.com/v5/market/instruments-info"
+    params = {
+        "category": "linear"
+    }
 
-    opportunities = []
+    try:
+        r = requests.get(url, params=params, timeout=10)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-    for symbol in symbols:
-        try:
-            df = add_indicators(get_candles(symbol, "240"))
-            last = df.iloc[-1]
+    if r.status_code != 200:
+        return jsonify({
+            "error": "Erro ao acessar API da Bybit",
+            "status_code": r.status_code,
+            "response": r.text
+        }), 500
 
-            if (
-                structure(df) == "Alta"
-                and last["close"] > last["ma50"] > last["ma200"]
-                and last["rsi"] > 50
-            ):
-                opportunities.append({
-                    "symbol": symbol,
-                    "preco": round(last["close"], 2),
-                    "estrutura": "Alta"
-                })
-        except:
-            continue
+    try:
+        data = r.json()
+    except Exception:
+        return jsonify({
+            "error": "Resposta da Bybit não é JSON",
+            "raw_response": r.text
+        }), 500
+
+    if "result" not in data or "list" not in data["result"]:
+        return jsonify({
+            "error": "Formato inesperado da API da Bybit",
+            "response": data
+        }), 500
+
+    symbols = [
+        s["symbol"]
+        for s in data["result"]["list"]
+        if s.get("quoteCoin") == "USDT"
+    ]
 
     return jsonify({
-        "total_encontrados": len(opportunities),
-        "oportunidades": opportunities[:10]
+        "status": "ok",
+        "total_pairs": len(symbols),
+        "pairs_preview": symbols[:20]  # preview
     })
 
-# ===============================
-# START
-# ===============================
+
+# ======================================================
+# ANÁLISE DE UM PAR ESPECÍFICO
+# ======================================================
+@app.route("/analyze")
+def analyze_symbol():
+    symbol = request.args.get("symbol")
+
+    if not symbol:
+        return jsonify({
+            "error": "Par inválido",
+            "message": "Use /analyze?symbol=BTCUSDT"
+        }), 400
+
+    # Aqui entra futuramente:
+    # - Estrutura
+    # - Topos e fundos
+    # - Indicadores
+    # - Gestão de risco
+    # - Setup do usuário
+
+    return jsonify({
+        "status": "analysis_received",
+        "symbol": symbol,
+        "structure": "não calculada (placeholder)",
+        "recommendation": "Somente análise de cenário no momento",
+        "risk_management": {
+            "max_risk_per_trade": "3% a 5%",
+            "rr_minimum": "1:3"
+        },
+        "note": "Módulo de análise completa será aplicado aqui"
+    })
+
+
+# ======================================================
+# START LOCAL (IGNORADO NO RENDER, MAS ÚTIL PARA TESTE)
+# ======================================================
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
